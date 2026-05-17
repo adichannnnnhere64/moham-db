@@ -1,6 +1,7 @@
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
+    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode},
     Column, MySqlPool, Row,
 };
 use std::{
@@ -127,6 +128,40 @@ pub fn push_log(history: &LogHistory, level: LogLevel, message: impl Into<String
     }
 }
 
+/// Extract any MySQL column value as an Option<String>.
+/// Tries types in order: i64, u64, f64, bool, NaiveDateTime, NaiveDate, NaiveTime, String, Vec<u8>.
+/// Returns None only when the value is truly SQL NULL.
+fn col_to_string(row: &MySqlRow, col: &str) -> Option<String> {
+    if let Ok(v) = row.try_get::<Option<i64>, _>(col) {
+        return v.map(|n| n.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<u64>, _>(col) {
+        return v.map(|n| n.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(col) {
+        return v.map(|n| n.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(col) {
+        return v.map(|b| (b as i32).to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(col) {
+        return v.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(col) {
+        return v.map(|d| d.format("%Y-%m-%d").to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(col) {
+        return v.map(|t| t.format("%H:%M:%S").to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<String>, _>(col) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(col) {
+        return v.map(|b| String::from_utf8_lossy(&b).into_owned());
+    }
+    None
+}
+
 pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u64, String> {
     push_log(
         history,
@@ -201,8 +236,7 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
         for row in &rows {
             let mut q = sqlx::query(&insert_sql);
             for col in &columns {
-                let val: Option<String> = row.try_get(col.as_str()).ok();
-                q = q.bind(val);
+                q = q.bind(col_to_string(row, col));
             }
             match q.execute(&local_pool).await {
                 Ok(_) => synced += 1,
