@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS local_orders (
+  id INT NOT NULL PRIMARY KEY,
+  customer_name VARCHAR(255) NOT NULL,
+  amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  status VARCHAR(50) NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP NULL,
+  updated_at TIMESTAMP NULL
+);

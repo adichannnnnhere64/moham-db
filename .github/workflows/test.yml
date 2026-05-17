@@ -1,0 +1,105 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  SYNC_REMOTE_HOST: 127.0.0.1
+  SYNC_REMOTE_PORT: 3308
+  SYNC_REMOTE_DB: sync_remote_test
+  SYNC_REMOTE_USER: sync
+  SYNC_REMOTE_PASS: sync
+  SYNC_LOCAL_HOST: 127.0.0.1
+  SYNC_LOCAL_PORT: 3307
+  SYNC_LOCAL_DB: sync_local_test
+  SYNC_LOCAL_USER: sync
+  SYNC_LOCAL_PASS: sync
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql-local:
+        image: mysql:8
+        ports:
+          - 3307:3306
+        env:
+          MYSQL_DATABASE: sync_local_test
+          MYSQL_USER: sync
+          MYSQL_PASSWORD: sync
+          MYSQL_ROOT_PASSWORD: root
+        options: >-
+          --health-cmd "mysqladmin ping -h127.0.0.1 -usync -psync"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+
+      mysql-remote:
+        image: mysql:8
+        ports:
+          - 3308:3306
+        env:
+          MYSQL_DATABASE: sync_remote_test
+          MYSQL_USER: sync
+          MYSQL_PASSWORD: sync
+          MYSQL_ROOT_PASSWORD: root
+        options: >-
+          --health-cmd "mysqladmin ping -h127.0.0.1 -usync -psync"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libssl-dev pkg-config mysql-client
+
+      - name: Seed remote DB schema + data
+        run: |
+          mysql -h127.0.0.1 -P3308 -usync -psync sync_remote_test \
+            < migrations/test/001_create_test_tables.sql
+
+      - name: Seed local DB schema
+        run: |
+          mysql -h127.0.0.1 -P3307 -usync -psync sync_local_test \
+            < migrations/test/002_create_local_tables.sql
+
+      - name: Verify remote DB has rows (smoke check)
+        run: |
+          COUNT=$(mysql -h127.0.0.1 -P3308 -usync -psync sync_remote_test \
+            -se "SELECT COUNT(*) FROM remote_orders;")
+          echo "remote_orders row count: $COUNT"
+          [ "$COUNT" -gt 0 ] || (echo "ERROR: remote_orders is empty" && exit 1)
+
+      - name: Run unit tests
+        working-directory: src-tauri
+        run: cargo test --no-default-features -- --test-threads=1
+
+      - name: Run integration tests (real MySQL)
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features integration -- --test-threads=1
+
+      - name: Frontend type check + build
+        run: |
+          npm ci
+          npm run build

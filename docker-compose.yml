@@ -1,0 +1,30 @@
+services:
+  mysql-local:
+    image: mysql:8
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_DATABASE: sync_local_test
+      MYSQL_USER: sync
+      MYSQL_PASSWORD: sync
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "sync", "-psync"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mysql-remote:
+    image: mysql:8
+    ports:
+      - "3308:3306"
+    environment:
+      MYSQL_DATABASE: sync_remote_test
+      MYSQL_USER: sync
+      MYSQL_PASSWORD: sync
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "sync", "-psync"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
