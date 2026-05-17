@@ -1,8 +1,7 @@
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode},
-    Column, MySqlPool, Row,
+    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
+    MySqlPool, Row,
 };
 use std::{
     collections::VecDeque,
@@ -128,40 +127,6 @@ pub fn push_log(history: &LogHistory, level: LogLevel, message: impl Into<String
     }
 }
 
-/// Extract any MySQL column value as an Option<String>.
-/// Tries types in order: i64, u64, f64, bool, NaiveDateTime, NaiveDate, NaiveTime, String, Vec<u8>.
-/// Returns None only when the value is truly SQL NULL.
-fn col_to_string(row: &MySqlRow, col: &str) -> Option<String> {
-    if let Ok(v) = row.try_get::<Option<i64>, _>(col) {
-        return v.map(|n| n.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<u64>, _>(col) {
-        return v.map(|n| n.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(col) {
-        return v.map(|n| n.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<bool>, _>(col) {
-        return v.map(|b| (b as i32).to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<NaiveDateTime>, _>(col) {
-        return v.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<NaiveDate>, _>(col) {
-        return v.map(|d| d.format("%Y-%m-%d").to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<NaiveTime>, _>(col) {
-        return v.map(|t| t.format("%H:%M:%S").to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<String>, _>(col) {
-        return v;
-    }
-    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(col) {
-        return v.map(|b| String::from_utf8_lossy(&b).into_owned());
-    }
-    None
-}
-
 pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u64, String> {
     push_log(
         history,
@@ -194,8 +159,46 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
             continue;
         }
 
-        let query = format!("SELECT * FROM `{remote_table}`");
-        let rows = match sqlx::query(&query).fetch_all(&remote_pool).await {
+        // Discover columns via SHOW COLUMNS so we know exact names and order.
+        let col_rows = match sqlx::query(&format!("SHOW COLUMNS FROM `{remote_table}`"))
+            .fetch_all(&remote_pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                push_log(
+                    history,
+                    LogLevel::Error,
+                    format!("Failed to describe '{remote_table}': {e}"),
+                );
+                continue;
+            }
+        };
+
+        if col_rows.is_empty() {
+            push_log(
+                history,
+                LogLevel::Info,
+                format!("Table '{remote_table}' has no columns"),
+            );
+            continue;
+        }
+
+        let columns: Vec<String> = col_rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("Field").ok())
+            .collect();
+
+        // CAST every column to CHAR so binary-protocol type inference is bypassed.
+        // All values arrive as strings regardless of source type (INT, DECIMAL, TIMESTAMP, etc.).
+        let cast_list = columns
+            .iter()
+            .map(|c| format!("CAST(`{c}` AS CHAR) AS `{c}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let select_sql = format!("SELECT {cast_list} FROM `{remote_table}`");
+        let rows = match sqlx::query(&select_sql).fetch_all(&remote_pool).await {
             Ok(r) => r,
             Err(e) => {
                 push_log(
@@ -216,12 +219,6 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
             continue;
         }
 
-        let columns: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect();
-
         let col_list = columns
             .iter()
             .map(|c| format!("`{c}`"))
@@ -236,7 +233,11 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
         for row in &rows {
             let mut q = sqlx::query(&insert_sql);
             for col in &columns {
-                q = q.bind(col_to_string(row, col));
+                // All values are CHAR now — simple string decode always works.
+                let val: Option<String> = row.try_get::<Option<String>, _>(col.as_str())
+                    .ok()
+                    .flatten();
+                q = q.bind(val);
             }
             match q.execute(&local_pool).await {
                 Ok(_) => synced += 1,
@@ -518,6 +519,15 @@ mod tests {
         let synced = execute_sync(&config, &history)
             .await
             .expect("sync must succeed");
+
+        // Print all logs so CI output shows exactly what happened on failure.
+        {
+            let logs = history.lock().unwrap();
+            for entry in logs.iter() {
+                println!("[{:?}] {}", entry.level, entry.message);
+            }
+        }
+
         assert!(synced > 0, "must sync at least one row, got {synced}");
 
         // Verify rows actually landed in local DB.
