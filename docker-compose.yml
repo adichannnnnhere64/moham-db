@@ -8,6 +8,9 @@ services:
       MYSQL_USER: sync
       MYSQL_PASSWORD: sync
       MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mysql-local-data:/var/lib/mysql
+      - ./docker/mysql-local/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "sync", "-psync"]
       interval: 2s
@@ -23,8 +26,15 @@ services:
       MYSQL_USER: sync
       MYSQL_PASSWORD: sync
       MYSQL_ROOT_PASSWORD: root
+    volumes:
+      - mysql-remote-data:/var/lib/mysql
+      - ./docker/mysql-remote/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "sync", "-psync"]
       interval: 2s
       timeout: 5s
       retries: 30
+
+volumes:
+  mysql-local-data:
+  mysql-remote-data:

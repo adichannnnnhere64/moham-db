@@ -95,13 +95,20 @@ fn now_ms() -> u64 {
 }
 
 fn connect_options(db: &DbConfig) -> MySqlConnectOptions {
-    MySqlConnectOptions::new()
+    let mut opts = MySqlConnectOptions::new()
         .host(&db.host)
         .port(db.port)
-        .database(&db.database)
-        .username(&db.username)
-        .password(&db.password)
-        .ssl_mode(MySqlSslMode::Disabled)
+        .ssl_mode(MySqlSslMode::Disabled);
+    if !db.username.is_empty() {
+        opts = opts.username(&db.username);
+    }
+    if !db.password.is_empty() {
+        opts = opts.password(&db.password);
+    }
+    if !db.database.is_empty() {
+        opts = opts.database(&db.database);
+    }
+    opts
 }
 
 pub async fn open_pool(db: &DbConfig) -> Result<MySqlPool, String> {
@@ -480,11 +487,11 @@ mod tests {
         let pool = open_pool(&remote_db())
             .await
             .expect("remote DB must be reachable");
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM remote_orders")
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM customers")
             .fetch_one(&pool)
             .await
-            .expect("remote_orders table must exist and have rows");
-        assert!(count > 0, "remote_orders must have seed rows, got {count}");
+            .expect("customers table must exist and have rows");
+        assert!(count > 0, "remote customers must have seed rows, got {count}");
         pool.close().await;
     }
 
@@ -494,23 +501,24 @@ mod tests {
         let pool = open_pool(&local_db())
             .await
             .expect("local DB must be reachable");
-        // Just verify the table exists (may be empty before first sync).
-        let _rows = sqlx::query("SELECT * FROM local_orders LIMIT 1")
+        let _rows = sqlx::query("SELECT * FROM customers LIMIT 1")
             .fetch_all(&pool)
             .await
-            .expect("local_orders table must exist");
+            .expect("local customers table must exist");
         pool.close().await;
     }
 
     #[cfg(feature = "integration")]
     #[tokio::test]
     async fn execute_sync_copies_rows_to_local() {
+        // Sync customers from remote → local.
+        // Remote seed has 3 rows; local seed has 2. After sync local must have 3.
         let config = SyncConfig {
             remote_db: remote_db(),
             local_db: local_db(),
             table_mappings: vec![TableMapping {
-                remote_table: "remote_orders".into(),
-                local_table: "local_orders".into(),
+                remote_table: "customers".into(),
+                local_table: "customers".into(),
             }],
             interval_minutes: 10,
         };
@@ -520,7 +528,6 @@ mod tests {
             .await
             .expect("sync must succeed");
 
-        // Print all logs so CI output shows exactly what happened on failure.
         {
             let logs = history.lock().unwrap();
             for entry in logs.iter() {
@@ -530,16 +537,14 @@ mod tests {
 
         assert!(synced > 0, "must sync at least one row, got {synced}");
 
-        // Verify rows actually landed in local DB.
         let local_pool = open_pool(&local_db()).await.unwrap();
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM local_orders")
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM customers")
             .fetch_one(&local_pool)
             .await
             .unwrap();
-        assert!(count > 0, "local_orders must have rows after sync, got {count}");
+        assert!(count >= 3, "local customers must have >= 3 rows after sync, got {count}");
         local_pool.close().await;
 
-        // Verify SUCCESS log was emitted.
         let logs = history.lock().unwrap();
         assert!(
             logs.iter().any(|e| e.level == LogLevel::Success),
@@ -560,7 +565,6 @@ mod tests {
             interval_minutes: 0,
         };
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
-        // Should succeed (return Ok) but sync 0 rows.
         let synced = execute_sync(&config, &history)
             .await
             .expect("sync with blank mapping must not error");
@@ -575,12 +579,11 @@ mod tests {
             local_db: local_db(),
             table_mappings: vec![TableMapping {
                 remote_table: "table_that_does_not_exist_xyz".into(),
-                local_table: "local_orders".into(),
+                local_table: "customers".into(),
             }],
             interval_minutes: 0,
         };
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
-        // Should succeed overall (partial failure per-table) but log an error.
         let _ = execute_sync(&config, &history).await;
         let logs = history.lock().unwrap();
         assert!(

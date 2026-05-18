@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration test-up test-wait test-migrate test-down test-clean
+.PHONY: test test-unit test-integration test-up test-wait test-down test-clean
 
 export SYNC_REMOTE_HOST := 127.0.0.1
 export SYNC_REMOTE_PORT := 3308
@@ -11,7 +11,9 @@ export SYNC_LOCAL_DB    := sync_local_test
 export SYNC_LOCAL_USER  := sync
 export SYNC_LOCAL_PASS  := sync
 
-test: test-up test-wait test-migrate test-unit test-integration
+# Full test run: start containers (initdb seeds on first run), run all tests.
+# Use `make test-clean && make test` for a guaranteed fresh-seed run.
+test: test-up test-wait test-unit test-integration
 
 test-unit:
 	cargo test --manifest-path src-tauri/Cargo.toml --no-default-features -- --test-threads=1
@@ -29,12 +31,9 @@ test-wait:
 	@until docker compose exec -T mysql-remote mysqladmin ping -h127.0.0.1 -usync -psync --silent 2>/dev/null; do sleep 1; done
 	@echo "Both ready."
 
-test-migrate:
-	docker compose exec -T mysql-remote mysql -usync -psync sync_remote_test < migrations/test/001_create_test_tables.sql
-	docker compose exec -T mysql-local  mysql -usync -psync sync_local_test  < migrations/test/002_create_local_tables.sql
-
 test-down:
 	docker compose down
 
+# Remove volumes so next test-up re-runs docker-entrypoint-initdb.d scripts.
 test-clean:
 	docker compose down -v --remove-orphans

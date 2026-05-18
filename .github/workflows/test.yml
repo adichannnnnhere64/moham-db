@@ -74,22 +74,26 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get install -y libssl-dev pkg-config mysql-client
 
-      - name: Seed remote DB schema + data
+      - name: Seed remote DB
         run: |
           mysql -h127.0.0.1 -P3308 -usync -psync sync_remote_test \
-            < migrations/test/001_create_test_tables.sql
+            < docker/mysql-remote/initdb/001-schema.sql
+          mysql -h127.0.0.1 -P3308 -usync -psync sync_remote_test \
+            < docker/mysql-remote/initdb/002-seed.sql
 
-      - name: Seed local DB schema
+      - name: Seed local DB
         run: |
           mysql -h127.0.0.1 -P3307 -usync -psync sync_local_test \
-            < migrations/test/002_create_local_tables.sql
+            < docker/mysql-local/initdb/001-schema.sql
+          mysql -h127.0.0.1 -P3307 -usync -psync sync_local_test \
+            < docker/mysql-local/initdb/002-seed.sql
 
-      - name: Verify remote DB has rows (smoke check)
+      - name: Smoke check — remote has seed rows
         run: |
           COUNT=$(mysql -h127.0.0.1 -P3308 -usync -psync sync_remote_test \
-            -se "SELECT COUNT(*) FROM remote_orders;")
-          echo "remote_orders row count: $COUNT"
-          [ "$COUNT" -gt 0 ] || (echo "ERROR: remote_orders is empty" && exit 1)
+            -se "SELECT COUNT(*) FROM customers;")
+          echo "remote customers row count: $COUNT"
+          [ "$COUNT" -gt 0 ] || (echo "ERROR: remote customers table is empty" && exit 1)
 
       - name: Run unit tests
         working-directory: src-tauri
