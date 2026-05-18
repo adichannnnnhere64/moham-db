@@ -187,6 +187,21 @@ fn clear_logs(state: State<'_, ManagedState>) -> Result<(), String> {
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+async fn list_tables(db_config: DbConfig) -> Result<Vec<String>, String> {
+    let pool = open_pool(&db_config).await?;
+    let rows = sqlx::query("SHOW TABLES")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| format!("Failed to list tables: {e}"))?;
+    pool.close().await;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>(0).ok())
+        .collect())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 async fn test_connection(db_config: DbConfig) -> Result<ConnectionResult, String> {
     match open_pool(&db_config).await {
         Ok(pool) => {
@@ -226,6 +241,7 @@ pub fn run() {
             activity_logs,
             clear_logs,
             test_connection,
+            list_tables,
         ])
         .setup(|app| {
             #[cfg(target_os = "windows")]

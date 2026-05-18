@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SyncConfig, TableMappingItem } from "../App";
 
@@ -7,6 +8,23 @@ type Props = {
 };
 
 export default function TableMapping({ config, setConfig }: Props) {
+  const [remoteTables, setRemoteTables] = useState<string[]>([]);
+  const [localTables, setLocalTables] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!config.remoteDb.host || !config.remoteDb.database) return;
+    invoke<string[]>("list_tables", { dbConfig: config.remoteDb })
+      .then(setRemoteTables)
+      .catch(() => setRemoteTables([]));
+  }, [config.remoteDb]);
+
+  useEffect(() => {
+    if (!config.localDb.host || !config.localDb.database) return;
+    invoke<string[]>("list_tables", { dbConfig: config.localDb })
+      .then(setLocalTables)
+      .catch(() => setLocalTables([]));
+  }, [config.localDb]);
+
   function addRow() {
     setConfig((c) => ({
       ...c,
@@ -30,14 +48,6 @@ export default function TableMapping({ config, setConfig }: Props) {
     }));
   }
 
-  async function handleSave() {
-    try {
-      await invoke("save_settings", { config });
-    } catch {
-      // ignore
-    }
-  }
-
   return (
     <>
       <p className="page-title">Table Mapping</p>
@@ -53,6 +63,13 @@ export default function TableMapping({ config, setConfig }: Props) {
           <p className="empty">No mappings yet. Add one above.</p>
         ) : (
           <>
+            <datalist id="remote-tables-list">
+              {remoteTables.map((t) => <option key={t} value={t} />)}
+            </datalist>
+            <datalist id="local-tables-list">
+              {localTables.map((t) => <option key={t} value={t} />)}
+            </datalist>
+
             <div className="mapping-header">
               <span>Remote Table</span>
               <span>Local Table</span>
@@ -64,11 +81,13 @@ export default function TableMapping({ config, setConfig }: Props) {
                   value={m.remoteTable}
                   onChange={(e) => updateRow(i, { remoteTable: e.currentTarget.value })}
                   placeholder="remote_orders"
+                  list="remote-tables-list"
                 />
                 <input
                   value={m.localTable}
                   onChange={(e) => updateRow(i, { localTable: e.currentTarget.value })}
                   placeholder="local_orders"
+                  list="local-tables-list"
                 />
                 <button
                   className="btn btn-danger"
@@ -83,7 +102,7 @@ export default function TableMapping({ config, setConfig }: Props) {
         )}
 
         <div className="btn-row">
-          <button className="btn btn-primary" onClick={handleSave}>
+          <button className="btn btn-primary" onClick={() => invoke("save_settings", { config }).catch(() => {})}>
             Save Mappings
           </button>
         </div>

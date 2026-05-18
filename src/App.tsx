@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Dashboard from "./pages/Dashboard";
 import DBConnections from "./pages/DBConnections";
 import TableMapping from "./pages/TableMapping";
@@ -53,6 +54,23 @@ const NAV: { id: Page; label: string }[] = [
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [config, setConfig] = useState<SyncConfig>(defaultConfig());
+  const hasLoaded = useRef(false);
+
+  useEffect(() => {
+    invoke<SyncConfig>("load_settings")
+      .then((saved) => {
+        setConfig(saved);
+        hasLoaded.current = true;
+      })
+      .catch(() => {
+        hasLoaded.current = true;
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded.current) return;
+    invoke("save_settings", { config }).catch(() => {});
+  }, [config]);
 
   return (
     <div className="shell">
