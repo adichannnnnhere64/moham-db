@@ -95,14 +95,15 @@ fn now_ms() -> u64 {
 }
 
 fn connect_options(db: &DbConfig) -> MySqlConnectOptions {
-    // MySqlSslMode::Preferred: use SSL when server supports it, fall back to
-    // plain text otherwise. Disabled breaks MySQL 5 auth — native_password
-    // challenge-response isn't transmitted correctly over non-SSL with some
-    // 5.x builds, causing "using password: NO" even when a password is set.
+    // MySqlSslMode::Disabled: skip SSL entirely. Preferred/Required fail with
+    // HandshakeFailure when the server advertises SSL but has a bad cert or
+    // TLS version mismatch — sqlx does NOT fall back after a failed handshake.
+    // mysql_native_password (MySQL 5/8) transmits the password hash regardless
+    // of SSL, so Disabled is safe for password-based auth on plain networks.
     let mut opts = MySqlConnectOptions::new()
         .host(&db.host)
         .port(db.port)
-        .ssl_mode(MySqlSslMode::Preferred);
+        .ssl_mode(MySqlSslMode::Disabled);
     if !db.username.is_empty() {
         opts = opts.username(&db.username);
     }
