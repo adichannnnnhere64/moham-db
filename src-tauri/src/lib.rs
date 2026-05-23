@@ -3,9 +3,11 @@ pub mod sync;
 #[cfg(feature = "desktop")]
 use serde::Serialize;
 #[cfg(feature = "desktop")]
+use sqlx::Row;
+#[cfg(feature = "desktop")]
 use sync::{
-    execute_sync, open_pool, push_log, start_sync_worker, DbConfig, LogEntry, LogHistory,
-    LogLevel, SyncConfig, SyncHandle,
+    execute_sync, open_pool, start_sync_worker, DbConfig, LogEntry, LogHistory, SyncConfig,
+    SyncHandle,
 };
 #[cfg(feature = "desktop")]
 use std::{
