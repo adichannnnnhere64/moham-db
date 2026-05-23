@@ -95,10 +95,14 @@ fn now_ms() -> u64 {
 }
 
 fn connect_options(db: &DbConfig) -> MySqlConnectOptions {
+    // MySqlSslMode::Preferred: use SSL when server supports it, fall back to
+    // plain text otherwise. Disabled breaks MySQL 5 auth — native_password
+    // challenge-response isn't transmitted correctly over non-SSL with some
+    // 5.x builds, causing "using password: NO" even when a password is set.
     let mut opts = MySqlConnectOptions::new()
         .host(&db.host)
         .port(db.port)
-        .ssl_mode(MySqlSslMode::Disabled);
+        .ssl_mode(MySqlSslMode::Preferred);
     if !db.username.is_empty() {
         opts = opts.username(&db.username);
     }
@@ -432,6 +436,29 @@ mod tests {
     }
 
     #[test]
+    fn connect_options_does_not_panic_with_password() {
+        // Regression: password must not be silently dropped regardless of MySQL version.
+        // connect_options() must accept non-empty password without panicking.
+        let with_pass = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            database: "mydb".into(),
+            username: "readonly".into(),
+            password: "secret123".into(),
+        };
+        let _ = connect_options(&with_pass); // must not panic
+
+        let no_pass = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            database: "mydb".into(),
+            username: "readonly".into(),
+            password: "".into(),
+        };
+        let _ = connect_options(&no_pass); // must not panic
+    }
+
+    #[test]
     fn execute_sync_skips_empty_table_names() {
         // SyncConfig with a mapping that has blank table names shouldn't panic.
         // We just verify the config struct accepts it safely.
@@ -569,6 +596,29 @@ mod tests {
             .await
             .expect("sync with blank mapping must not error");
         assert_eq!(synced, 0, "blank mapping must sync 0 rows");
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn wrong_password_error_says_using_password_yes() {
+        // Regression test: when a non-empty password is provided, sqlx must
+        // transmit it. MySQL reports "using password: NO" if the password hash
+        // is not sent — this was broken with MySqlSslMode::Disabled on MySQL 5.
+        let mut db = remote_db();
+        db.password = "definitely_wrong_password_xyz_12345".into();
+        let result = open_pool(&db).await;
+        assert!(result.is_err(), "connection with wrong password must fail");
+        let err = result.unwrap_err().to_string().to_lowercase();
+        // "using password: no" means sqlx silently dropped the password — that's the bug.
+        assert!(
+            !err.contains("using password: no"),
+            "password was silently dropped (using password: NO). err: {err}"
+        );
+        // Confirm MySQL received the password (even if wrong).
+        assert!(
+            err.contains("access denied") || err.contains("using password: yes"),
+            "expected auth failure with password transmitted, got: {err}"
+        );
     }
 
     #[cfg(feature = "integration")]
