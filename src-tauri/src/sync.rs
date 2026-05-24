@@ -6,7 +6,7 @@ use sqlx::{
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::oneshot;
 
@@ -119,6 +119,7 @@ fn connect_options(db: &DbConfig) -> MySqlConnectOptions {
 pub async fn open_pool(db: &DbConfig) -> Result<MySqlPool, String> {
     MySqlPoolOptions::new()
         .max_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options(db))
         .await
         .map_err(|e| e.to_string())
