@@ -150,6 +150,11 @@ body { font-family: var(--font); background: var(--content-bg); color: var(--tex
 .section-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .section-heading h2 { font-size: 13.5px; font-weight: 600; color: var(--text); }
 
+/* Toggles */
+.toggle-row { display: flex; flex-direction: column; gap: 10px; }
+.toggle { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text); cursor: pointer; }
+.toggle input { width: 15px; height: 15px; cursor: pointer; }
+
 /* Forms */
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .form-grid.single { grid-template-columns: 1fr; }

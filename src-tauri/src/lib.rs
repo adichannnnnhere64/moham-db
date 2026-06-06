@@ -196,9 +196,16 @@ async fn list_tables(db_config: DbConfig) -> Result<Vec<String>, String> {
         .await
         .map_err(|e| format!("Failed to list tables: {e}"))?;
     pool.close().await;
+    // SHOW TABLES columns arrive typed as VARBINARY, so try String then bytes.
     Ok(rows
         .iter()
-        .filter_map(|row| row.try_get::<String, _>(0).ok())
+        .filter_map(|row| {
+            row.try_get::<String, _>(0).ok().or_else(|| {
+                row.try_get::<Vec<u8>, _>(0)
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })
+        })
         .collect())
 }
 
@@ -216,10 +223,18 @@ async fn test_connection(db_config: DbConfig) -> Result<ConnectionResult, String
                 ),
             })
         }
-        Err(e) => Ok(ConnectionResult {
-            ok: false,
-            message: e,
-        }),
+        Err(e) => {
+            // "using password: NO" means MySQL got no password. If the user set
+            // a username but left the password blank, hint at the likely cause.
+            let mut message = e;
+            if message.contains("using password: NO")
+                && !db_config.username.trim().is_empty()
+                && db_config.password.trim().is_empty()
+            {
+                message.push_str(" (no password was sent — check the Password field)");
+            }
+            Ok(ConnectionResult { ok: false, message })
+        }
     }
 }
 

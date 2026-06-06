@@ -17,6 +17,9 @@ env:
   SYNC_LOCAL_DB: sync_local_test
   SYNC_LOCAL_USER: sync
   SYNC_LOCAL_PASS: sync
+  SYNC_REMOTE_RO_USER: readonly
+  SYNC_REMOTE_RO_PASS: readonly
+  SYNC_LOCAL_FRESH_DB: sync_local_fresh
 
 jobs:
   test:
@@ -87,6 +90,16 @@ jobs:
             < docker/mysql-local/initdb/001-schema.sql
           mysql -h127.0.0.1 -P3307 -usync -psync sync_local_test \
             < docker/mysql-local/initdb/002-seed.sql
+
+      - name: Create readonly remote user (root)
+        run: |
+          mysql -h127.0.0.1 -P3308 -uroot -proot \
+            < docker/mysql-remote/initdb/000-readonly-user.sql
+
+      - name: Create fresh empty local DB (root)
+        run: |
+          mysql -h127.0.0.1 -P3307 -uroot -proot \
+            < docker/mysql-local/initdb/000-create-fresh-db.sql
 
       - name: Smoke check — remote has seed rows
         run: |

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
-    MySqlPool, Row,
+    MySqlConnection, MySqlPool, Row,
 };
 use std::{
     collections::VecDeque,
@@ -37,6 +37,14 @@ pub struct SyncConfig {
     pub remote_db: DbConfig,
     pub table_mappings: Vec<TableMapping>,
     pub interval_minutes: u64,
+    /// When true, ignore table_mappings and sync EVERY table found on the
+    /// remote DB (via SHOW TABLES), each mapped to a same-named local table.
+    #[serde(default)]
+    pub sync_all_tables: bool,
+    /// When true, auto-create missing local tables from the remote schema
+    /// (SHOW CREATE TABLE). Lets a fresh/empty local DB receive everything.
+    #[serde(default)]
+    pub create_missing_tables: bool,
 }
 
 impl Default for SyncConfig {
@@ -58,6 +66,8 @@ impl Default for SyncConfig {
             },
             table_mappings: Vec::new(),
             interval_minutes: 10,
+            sync_all_tables: false,
+            create_missing_tables: false,
         }
     }
 }
@@ -100,18 +110,25 @@ fn connect_options(db: &DbConfig) -> MySqlConnectOptions {
     // TLS version mismatch — sqlx does NOT fall back after a failed handshake.
     // mysql_native_password (MySQL 5/8) transmits the password hash regardless
     // of SSL, so Disabled is safe for password-based auth on plain networks.
+    // Trim credentials — a trailing space pasted into a field would otherwise
+    // make MySQL reject the login or, worse, send the wrong password.
+    let host = db.host.trim();
+    let username = db.username.trim();
+    let password = db.password.trim();
+    let database = db.database.trim();
+
     let mut opts = MySqlConnectOptions::new()
-        .host(&db.host)
+        .host(host)
         .port(db.port)
         .ssl_mode(MySqlSslMode::Disabled);
-    if !db.username.is_empty() {
-        opts = opts.username(&db.username);
+    if !username.is_empty() {
+        opts = opts.username(username);
     }
-    if !db.password.is_empty() {
-        opts = opts.password(&db.password);
+    if !password.is_empty() {
+        opts = opts.password(password);
     }
-    if !db.database.is_empty() {
-        opts = opts.database(&db.database);
+    if !database.is_empty() {
+        opts = opts.database(database);
     }
     opts
 }
@@ -140,6 +157,98 @@ pub fn push_log(history: &LogHistory, level: LogLevel, message: impl Into<String
     }
 }
 
+/// Read a column as a String, tolerating MySQL metadata commands (SHOW FULL
+/// TABLES, SHOW CREATE TABLE, …) whose columns arrive typed as VAR/BINARY
+/// rather than VARCHAR — a plain `try_get::<String>` fails on those.
+fn row_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> Option<String> {
+    if let Ok(s) = row.try_get::<String, _>(idx) {
+        return Some(s);
+    }
+    row.try_get::<Vec<u8>, _>(idx)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Build the list of (remote_table, local_table) pairs to sync.
+/// When `sync_all_tables` is set, discover every BASE TABLE on the remote
+/// (skipping VIEWs) and map each to a same-named local table. Otherwise use
+/// the manual `table_mappings`. Blank names are filtered out either way.
+async fn resolve_mappings(
+    config: &SyncConfig,
+    remote_pool: &MySqlPool,
+) -> Result<Vec<(String, String)>, String> {
+    let pairs: Vec<(String, String)> = if config.sync_all_tables {
+        // SHOW FULL TABLES: col 0 = table name, col 1 = Table_type. We filter to
+        // BASE TABLE in Rust (a `WHERE` clause on SHOW does not survive sqlx's
+        // prepared-statement protocol and silently returns no rows).
+        let rows = sqlx::query("SHOW FULL TABLES")
+            .fetch_all(remote_pool)
+            .await
+            .map_err(|e| format!("Failed to list remote tables: {e}"))?;
+        rows.iter()
+            .filter(|r| {
+                // col 1 = Table_type; keep only BASE TABLE (skip VIEWs).
+                row_string(r, 1)
+                    .map(|t| t.eq_ignore_ascii_case("BASE TABLE"))
+                    .unwrap_or(true)
+            })
+            .filter_map(|r| row_string(r, 0))
+            .map(|t| (t.clone(), t))
+            .collect()
+    } else {
+        config
+            .table_mappings
+            .iter()
+            .map(|m| (m.remote_table.clone(), m.local_table.clone()))
+            .collect()
+    };
+
+    Ok(pairs
+        .into_iter()
+        .filter(|(r, l)| !r.trim().is_empty() && !l.trim().is_empty())
+        .collect())
+}
+
+/// Turn a `SHOW CREATE TABLE` DDL into `CREATE TABLE IF NOT EXISTS \`local\` (...)`.
+/// SHOW CREATE TABLE always emits `CREATE TABLE \`name\` (...)` (never IF NOT
+/// EXISTS), so we find the first backtick-quoted identifier, drop it, and splice
+/// in `IF NOT EXISTS` plus the (possibly different) local table name.
+fn rewrite_create_table_ddl(ddl: &str, local_table: &str) -> String {
+    let quoted_local = format!("`{}`", local_table.replace('`', "``"));
+    if let Some(open) = ddl.find('`') {
+        if let Some(rel_close) = ddl[open + 1..].find('`') {
+            let close = open + 1 + rel_close;
+            let remainder = &ddl[close + 1..]; // everything after the table name
+            return format!("CREATE TABLE IF NOT EXISTS {quoted_local}{remainder}");
+        }
+    }
+    // No backtick found — not a recognizable SHOW CREATE TABLE output. Leave as-is.
+    ddl.to_string()
+}
+
+/// Ensure the local table exists by copying the remote schema. Reads
+/// `SHOW CREATE TABLE` from the remote (column index 1 holds the DDL), rewrites
+/// the name, and runs it on the single local connection. Idempotent.
+async fn ensure_local_table(
+    conn: &mut MySqlConnection,
+    remote_pool: &MySqlPool,
+    remote_table: &str,
+    local_table: &str,
+) -> Result<(), String> {
+    let row = sqlx::query(&format!("SHOW CREATE TABLE `{remote_table}`"))
+        .fetch_one(remote_pool)
+        .await
+        .map_err(|e| format!("Failed to read schema of '{remote_table}': {e}"))?;
+    let raw_ddl = row_string(&row, 1)
+        .ok_or_else(|| format!("Could not extract DDL for '{remote_table}'"))?;
+    let ddl = rewrite_create_table_ddl(&raw_ddl, local_table);
+    sqlx::query(&ddl)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to create local table '{local_table}': {e}"))?;
+    Ok(())
+}
+
 pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u64, String> {
     push_log(
         history,
@@ -162,14 +271,42 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
         msg
     })?;
 
+    let mappings = resolve_mappings(config, &remote_pool).await.map_err(|e| {
+        push_log(history, LogLevel::Error, &e);
+        e
+    })?;
+
+    if mappings.is_empty() {
+        push_log(history, LogLevel::Info, "No tables to sync.");
+        return Ok(0);
+    }
+
+    // Run ALL local writes (DDL + REPLACE) on a SINGLE connection so the
+    // session-scoped FOREIGN_KEY_CHECKS setting actually holds — a pooled
+    // multi-connection executor would scatter statements across sessions.
+    let mut conn = local_pool.acquire().await.map_err(|e| {
+        let msg = format!("Local DB connection acquire failed: {e}");
+        push_log(history, LogLevel::Error, &msg);
+        msg
+    })?;
+
+    // Disable FK checks when bootstrapping a fresh DB or syncing everything, so
+    // tables can be created and rows replaced in arbitrary order.
+    let fk_managed = config.create_missing_tables || config.sync_all_tables;
+    if fk_managed {
+        let _ = sqlx::query("SET FOREIGN_KEY_CHECKS=0")
+            .execute(&mut *conn)
+            .await;
+    }
+
     let mut total_rows: u64 = 0;
 
-    for mapping in &config.table_mappings {
-        let remote_table = &mapping.remote_table;
-        let local_table = &mapping.local_table;
-
-        if remote_table.trim().is_empty() || local_table.trim().is_empty() {
-            continue;
+    for (remote_table, local_table) in &mappings {
+        if config.create_missing_tables {
+            if let Err(e) = ensure_local_table(&mut conn, &remote_pool, remote_table, local_table).await {
+                push_log(history, LogLevel::Error, e);
+                continue;
+            }
         }
 
         // Discover columns via SHOW COLUMNS so we know exact names and order.
@@ -252,7 +389,7 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
                     .flatten();
                 q = q.bind(val);
             }
-            match q.execute(&local_pool).await {
+            match q.execute(&mut *conn).await {
                 Ok(_) => synced += 1,
                 Err(e) => {
                     push_log(
@@ -270,6 +407,12 @@ pub async fn execute_sync(config: &SyncConfig, history: &LogHistory) -> Result<u
             format!("Synced {synced} rows from Table '{remote_table}'"),
         );
         total_rows += synced;
+    }
+
+    if fk_managed {
+        let _ = sqlx::query("SET FOREIGN_KEY_CHECKS=1")
+            .execute(&mut *conn)
+            .await;
     }
 
     Ok(total_rows)
@@ -346,6 +489,26 @@ mod tests {
                 .unwrap_or_else(|_| "sync_local_test".into()),
             username: std::env::var("SYNC_LOCAL_USER").unwrap_or_else(|_| "sync".into()),
             password: std::env::var("SYNC_LOCAL_PASS").unwrap_or_else(|_| "sync".into()),
+        }
+    }
+
+    // Remote user with SELECT-only privilege — proves readonly remotes sync fine.
+    #[cfg(feature = "integration")]
+    fn readonly_remote_db() -> DbConfig {
+        DbConfig {
+            username: std::env::var("SYNC_REMOTE_RO_USER").unwrap_or_else(|_| "readonly".into()),
+            password: std::env::var("SYNC_REMOTE_RO_PASS").unwrap_or_else(|_| "readonly".into()),
+            ..remote_db()
+        }
+    }
+
+    // Empty local database (no tables) for fresh-bootstrap tests.
+    #[cfg(feature = "integration")]
+    fn local_fresh_db() -> DbConfig {
+        DbConfig {
+            database: std::env::var("SYNC_LOCAL_FRESH_DB")
+                .unwrap_or_else(|_| "sync_local_fresh".into()),
+            ..local_db()
         }
     }
 
@@ -426,6 +589,8 @@ mod tests {
                 local_table: "local_orders".into(),
             }],
             interval_minutes: 10,
+            sync_all_tables: false,
+            create_missing_tables: false,
         };
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
         let result = execute_sync(&config, &history).await;
@@ -461,6 +626,28 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_create_table_ddl_injects_if_not_exists() {
+        let ddl = "CREATE TABLE `customers` (\n  `id` int NOT NULL\n) ENGINE=InnoDB";
+        let out = rewrite_create_table_ddl(ddl, "customers");
+        assert!(out.starts_with("CREATE TABLE IF NOT EXISTS `customers` ("));
+        assert!(out.contains("ENGINE=InnoDB"));
+    }
+
+    #[test]
+    fn rewrite_create_table_ddl_renames_table() {
+        let ddl = "CREATE TABLE `customers` (`id` int)";
+        let out = rewrite_create_table_ddl(ddl, "local_customers");
+        assert_eq!(out, "CREATE TABLE IF NOT EXISTS `local_customers` (`id` int)");
+    }
+
+    #[test]
+    fn rewrite_create_table_ddl_escapes_backticks() {
+        let ddl = "CREATE TABLE `t` (`id` int)";
+        let out = rewrite_create_table_ddl(ddl, "we`ird");
+        assert!(out.starts_with("CREATE TABLE IF NOT EXISTS `we``ird` ("));
+    }
+
+    #[test]
     fn execute_sync_skips_empty_table_names() {
         // SyncConfig with a mapping that has blank table names shouldn't panic.
         // We just verify the config struct accepts it safely.
@@ -472,6 +659,8 @@ mod tests {
                 local_table: "".into(),
             }],
             interval_minutes: 0,
+            sync_all_tables: false,
+            create_missing_tables: false,
         };
         // execute_sync skips blank names — validated in integration tests.
         // Here we just ensure the struct is valid.
@@ -550,6 +739,8 @@ mod tests {
                 local_table: "customers".into(),
             }],
             interval_minutes: 10,
+            sync_all_tables: false,
+            create_missing_tables: false,
         };
 
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
@@ -592,6 +783,8 @@ mod tests {
                 local_table: "".into(),
             }],
             interval_minutes: 0,
+            sync_all_tables: false,
+            create_missing_tables: false,
         };
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
         let synced = execute_sync(&config, &history)
@@ -634,6 +827,8 @@ mod tests {
                 local_table: "customers".into(),
             }],
             interval_minutes: 0,
+            sync_all_tables: false,
+            create_missing_tables: false,
         };
         let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
         let _ = execute_sync(&config, &history).await;
@@ -642,5 +837,68 @@ mod tests {
             logs.iter().any(|e| e.level == LogLevel::Error),
             "missing table must produce an ERROR log"
         );
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn execute_sync_works_with_readonly_remote_user() {
+        // A SELECT-only remote user must be able to drive a full sync — the
+        // engine never writes to the remote. Sync everything into a fresh local.
+        let config = SyncConfig {
+            remote_db: readonly_remote_db(),
+            local_db: local_fresh_db(),
+            table_mappings: vec![],
+            interval_minutes: 0,
+            sync_all_tables: true,
+            create_missing_tables: true,
+        };
+        let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
+        let synced = execute_sync(&config, &history)
+            .await
+            .expect("readonly-remote sync must succeed");
+        {
+            let logs = history.lock().unwrap();
+            for e in logs.iter() {
+                println!("[{:?}] {}", e.level, e.message);
+            }
+        }
+        assert!(synced > 0, "readonly sync must copy rows, got {synced}");
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn execute_sync_bootstraps_fresh_local() {
+        // Fresh empty local DB + sync_all + create_missing → every remote table
+        // is created locally and all rows copied (exercises FK-off ordering).
+        let config = SyncConfig {
+            remote_db: remote_db(),
+            local_db: local_fresh_db(),
+            table_mappings: vec![],
+            interval_minutes: 0,
+            sync_all_tables: true,
+            create_missing_tables: true,
+        };
+        let history: LogHistory = Arc::new(Mutex::new(VecDeque::new()));
+        execute_sync(&config, &history)
+            .await
+            .expect("fresh-local bootstrap must succeed");
+
+        let pool = open_pool(&local_fresh_db()).await.unwrap();
+        for (table, expected) in [
+            ("customers", 3i64),
+            ("products", 3),
+            ("orders", 2),
+            ("order_items", 3),
+        ] {
+            let (count,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM `{table}`"))
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("table '{table}' must exist locally: {e}"));
+            assert_eq!(
+                count, expected,
+                "fresh local '{table}' must have {expected} rows, got {count}"
+            );
+        }
+        pool.close().await;
     }
 }

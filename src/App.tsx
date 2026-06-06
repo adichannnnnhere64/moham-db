@@ -26,6 +26,8 @@ export type SyncConfig = {
   remoteDb: DbConfig;
   tableMappings: TableMappingItem[];
   intervalMinutes: number;
+  syncAllTables: boolean;
+  createMissingTables: boolean;
 };
 
 export const defaultDbConfig = (): DbConfig => ({
@@ -41,6 +43,8 @@ export const defaultConfig = (): SyncConfig => ({
   remoteDb: defaultDbConfig(),
   tableMappings: [],
   intervalMinutes: 10,
+  syncAllTables: false,
+  createMissingTables: false,
 });
 
 const NAV: { id: Page; label: string }[] = [
@@ -54,16 +58,20 @@ const NAV: { id: Page; label: string }[] = [
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [config, setConfig] = useState<SyncConfig>(defaultConfig());
+  const [loaded, setLoaded] = useState(false);
   const hasLoaded = useRef(false);
 
   useEffect(() => {
     invoke<SyncConfig>("load_settings")
       .then((saved) => {
-        setConfig(saved);
-        hasLoaded.current = true;
+        // Merge over defaults so older settings.json files missing newer
+        // fields still produce a complete config.
+        setConfig({ ...defaultConfig(), ...saved });
       })
-      .catch(() => {
+      .catch(() => {})
+      .finally(() => {
         hasLoaded.current = true;
+        setLoaded(true);
       });
   }, []);
 
@@ -90,17 +98,23 @@ export default function App() {
       </aside>
 
       <main className="content">
-        {page === "dashboard" && <Dashboard config={config} />}
-        {page === "db-connections" && (
-          <DBConnections config={config} setConfig={setConfig} />
+        {!loaded ? (
+          <p className="empty">Loading settings…</p>
+        ) : (
+          <>
+            {page === "dashboard" && <Dashboard config={config} />}
+            {page === "db-connections" && (
+              <DBConnections config={config} setConfig={setConfig} />
+            )}
+            {page === "table-mapping" && (
+              <TableMapping config={config} setConfig={setConfig} />
+            )}
+            {page === "sync-settings" && (
+              <SyncSettings config={config} setConfig={setConfig} />
+            )}
+            {page === "activity-logs" && <ActivityLogs />}
+          </>
         )}
-        {page === "table-mapping" && (
-          <TableMapping config={config} setConfig={setConfig} />
-        )}
-        {page === "sync-settings" && (
-          <SyncSettings config={config} setConfig={setConfig} />
-        )}
-        {page === "activity-logs" && <ActivityLogs />}
       </main>
     </div>
   );

@@ -52,9 +52,38 @@ export default function TableMapping({ config, setConfig }: Props) {
     <>
       <p className="page-title">Table Mapping</p>
       <div className="card">
-        <div className="section-heading">
+        <div className="toggle-row">
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={config.syncAllTables}
+              onChange={(e) =>
+                setConfig((c) => ({ ...c, syncAllTables: e.currentTarget.checked }))
+              }
+            />
+            <span>Sync ALL remote tables automatically</span>
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={config.createMissingTables}
+              onChange={(e) =>
+                setConfig((c) => ({ ...c, createMissingTables: e.currentTarget.checked }))
+              }
+            />
+            <span>Create missing local tables (for a fresh local DB)</span>
+          </label>
+        </div>
+
+        {config.syncAllTables && (
+          <p className="empty" style={{ marginTop: 12 }}>
+            Syncing every remote table — manual mappings below are ignored.
+          </p>
+        )}
+
+        <div className="section-heading" style={{ marginTop: 18 }}>
           <h2>Remote → Local Table Pairs</h2>
-          <button className="btn btn-secondary" onClick={addRow}>
+          <button className="btn btn-secondary" onClick={addRow} disabled={config.syncAllTables}>
             + Add Mapping
           </button>
         </div>

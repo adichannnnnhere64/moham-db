@@ -10,6 +10,9 @@ export SYNC_LOCAL_PORT  := 3307
 export SYNC_LOCAL_DB    := sync_local_test
 export SYNC_LOCAL_USER  := sync
 export SYNC_LOCAL_PASS  := sync
+export SYNC_REMOTE_RO_USER := readonly
+export SYNC_REMOTE_RO_PASS := readonly
+export SYNC_LOCAL_FRESH_DB := sync_local_fresh
 
 # Full test run: start containers (initdb seeds on first run), run all tests.
 # Use `make test-clean && make test` for a guaranteed fresh-seed run.
